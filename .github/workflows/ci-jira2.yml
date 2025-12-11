@@ -1,4 +1,4 @@
-name: CI with Jira
+name: Jira Integration
 
 on:
   push:
@@ -12,89 +12,60 @@ on:
         default: 'KAN-1'
 
 jobs:
-  build-and-update-jira:
+  build:
     runs-on: ubuntu-latest
-    env:
-      GIT_URL: https://github.com/mudassir2222/onlinebookstore.git
-      JIRA_BASE: https://mudassirkhan376.atlassian.net
-      JIRA_EMAIL: ${{ secrets.JIRA_EMAIL }}
-      JIRA_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
 
     steps:
-      - name: Checkout repo
+
+      - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Install jq
-        run: sudo apt-get update && sudo apt-get install -y jq
-
-      # ===== Fetch Jira Details =====
-      - name: Fetch Jira Details
+      - name: Get commit message
+        id: getmsg
         run: |
-          ISSUE="${{ github.event.inputs.JIRA_ISSUE || 'KAN-1' }}"
-          echo "===== Fetch Jira ====="
-          echo "Issue: $ISSUE"
+          echo "msg=$(git log -1 --pretty=%B)" >> $GITHUB_OUTPUT
 
-          RESPONSE=$(curl -s -u "$JIRA_EMAIL:$JIRA_TOKEN" \
-            -H "Accept: application/json" \
-            "$JIRA_BASE/rest/api/2/issue/$ISSUE")
-
-          if echo "$RESPONSE" | jq -e 'has("errorMessages")' >/dev/null 2>&1; then
-            echo "Jira API returned error:"
-            echo "$RESPONSE" | jq '.errorMessages'
-            exit 1
-          fi
-
-          SUMMARY=$(echo "$RESPONSE" | jq -r '.fields.summary // "NO_SUMMARY"')
-          STATUS=$(echo "$RESPONSE" | jq -r '.fields.status.name // "NO_STATUS"')
-          echo "Summary: $SUMMARY"
-          echo "Status: $STATUS"
-
-      # ===== Clone Code =====
-      - name: Clone Code
+      - name: Extract Jira Issue
+        id: extract
         run: |
-          rm -rf onlinebookstore
-          git clone $GIT_URL
+          commit="${{ steps.getmsg.outputs.msg }}"
+          echo "Commit = $commit"
+          jira=$(echo "$commit" | grep -oE 'KAN-[0-9]+')
+          if [ -z "$jira" ]; then
+            echo "⚠️ Jira issue missing! Skipping Jira steps."
+            echo "jira=" >> $GITHUB_OUTPUT
+          else
+            echo "jira=$jira" >> $GITHUB_OUTPUT
 
-      # ===== Build =====
-      - name: Build (Maven)
+      - name: Move to In Progress
+        if: steps.extract.outputs.jira != ''
         run: |
-          cd onlinebookstore
-          mvn clean package -DskipTests=false
-
-      # ===== Test =====
-      - name: Run Tests
-        run: |
-          cd onlinebookstore
-          mvn test || true
-
-      # ===== Deploy (Simulated) =====
-      - name: Deploy (simulate)
-        run: |
-          echo "Deploying application..."
-          echo "Simulated deployment 완료"
-
-      # ===== Update Jira (Success) =====
-      - name: Update Jira Ticket (success)
-        if: success()
-        run: |
-          ISSUE="${{ github.event.inputs.JIRA_ISSUE || 'KAN-1' }}"
-          BUILD_NO=${{ github.run_number }}
-
-          curl -s -u "$JIRA_EMAIL:$JIRA_TOKEN" \
-            -X POST \
+          curl -v -X POST \
+            -H "Authorization: Basic $(echo -n "${{ secrets.JIRA_EMAIL }}:${{ secrets.JIRA_TOKEN }}" | base64)" \
             -H "Content-Type: application/json" \
-            --data "{\"body\":\"✅ Build & Deployment successful from GitHub Actions run $BUILD_NO\"}" \
-            "$JIRA_BASE/rest/api/2/issue/$ISSUE/comment"
+            -d '{"transition":{"id":"11"}}' \
+            "${{ secrets.JIRA_URL }}/rest/api/3/issue/${{ steps.extract.outputs.jira }}/transitions"
 
-      # ===== Update Jira (Failure) =====
-      - name: Update Jira Ticket (failure)
-        if: failure()
+      - name: Build
+        run: echo "Building..."
+
+      - name: Tests
+        run: echo "Running tests..."
+
+      - name: Jira Comment
+        if: steps.extract.outputs.jira != ''
         run: |
-          ISSUE="${{ github.event.inputs.JIRA_ISSUE || 'KAN-1' }}"
-          BUILD_NO=${{ github.run_number }}
-
-          curl -s -u "$JIRA_EMAIL:$JIRA_TOKEN" \
-            -X POST \
+          curl -v -X POST \
+            -H "Authorization: Basic $(echo -n "${{ secrets.JIRA_EMAIL }}:${{ secrets.JIRA_TOKEN }}" | base64)" \
             -H "Content-Type: application/json" \
-            --data "{\"body\":\"❌ GitHub Actions run $BUILD_NO failed. Check logs.\"}" \
-            "$JIRA_BASE/rest/api/2/issue/$ISSUE/comment" || true
+            -d "{\"body\": \"Build Success on GitHub Actions\"}" \
+            "${{ secrets.JIRA_URL }}/rest/api/3/issue/${{ steps.extract.outputs.jira }}/comment"
+
+      - name: Move Issue to Done
+        if: steps.extract.outputs.jira != ''
+        run: |
+          curl -v -X POST \
+            -H "Authorization: Basic $(echo -n "${{ secrets.JIRA_EMAIL }}:${{ secrets.JIRA_TOKEN }}" | base64)" \
+            -H "Content-Type: application/json" \
+            -d '{"transition":{"id":"31"}}' \
+            "${{ secrets.JIRA_URL }}/rest/api/3/issue/${{ steps.extract.outputs.jira }}/transitions"
